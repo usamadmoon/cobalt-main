@@ -1,0 +1,27 @@
+services:
+    cobalt:
+        image: ghcr.io/imputnet/cobalt:11
+        init: true
+        read_only: true
+        restart: unless-stopped
+        container_name: cobalt
+        expose:
+            - "9000"
+        environment:
+            # Public tunnel URL (nginx on host port 9000). Works for both UI and script.
+            API_URL: "http://127.0.0.1:9000/"
+            # media duration limit in seconds (default is 10800 = 3h)
+            # 36000 = 10 hours
+            DURATION_LIMIT: "36000"
+            CORS_WILDCARD: "1"
+
+    cobalt-proxy:
+        image: nginx:alpine
+        restart: unless-stopped
+        container_name: cobalt-proxy
+        ports:
+            - "9000:80/tcp"
+        volumes:
+            - ./nginx.conf:/etc/nginx/nginx.conf:ro
+        depends_on:
+            - cobalt
