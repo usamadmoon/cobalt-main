@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+
+ROOT="$(pwd)"
+RUN_DIR="$ROOT/.run"
+PID_FILE="$RUN_DIR/web.pid"
+WEB_PORT="5173"
+
+kill_tree() {
+  local pid="$1"
+  local signal="${2:-TERM}"
+  local child
+  # Kill descendants first so orphans don't linger
+  while read -r child; do
+    [[ -n "$child" ]] && kill_tree "$child" "$signal"
+  done < <(pgrep -P "$pid" 2>/dev/null || true)
+  kill "-$signal" "$pid" 2>/dev/null || true
+}
+
+echo "Stopping Cobalt..."
+
+if [[ -f "$PID_FILE" ]]; then
+  web_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [[ -n "${web_pid:-}" ]] && kill -0 "$web_pid" 2>/dev/null; then
+    kill_tree "$web_pid" TERM
+    for _ in $(seq 1 10); do
+      kill -0 "$web_pid" 2>/dev/null || break
+      sleep 0.3
+    done
+    if kill -0 "$web_pid" 2>/dev/null; then
+      kill_tree "$web_pid" KILL
+    fi
+    echo "Stopped web UI (pid $web_pid)."
+  else
+    echo "Web UI was not running (stale pid file)."
+  fi
+  rm -f "$PID_FILE"
+else
+  echo "No web UI pid file found."
+fi
+
+# Fallback: free the web port if something is still listening
+if command -v lsof >/dev/null 2>&1; then
+  port_pids="$(lsof -tiTCP:"$WEB_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+  if [[ -n "${port_pids:-}" ]]; then
+    echo "Freeing port $WEB_PORT..."
+    # shellcheck disable=SC2086
+    kill $port_pids 2>/dev/null || true
+    sleep 0.5
+    # shellcheck disable=SC2086
+    kill -9 $port_pids 2>/dev/null || true
+  fi
+fi
+
+# Stop API containers (cobalt + nginx proxy)
+if docker compose ps -q 2>/dev/null | grep -q .; then
+  docker compose down
+  echo "Stopped Docker services (cobalt, cobalt-proxy)."
+else
+  stopped_any=0
+  for name in cobalt cobalt-proxy; do
+    if docker ps -aq -f "name=^${name}$" 2>/dev/null | grep -q .; then
+      docker stop "$name" >/dev/null 2>&1 || true
+      docker rm "$name" >/dev/null 2>&1 || true
+      echo "Stopped container: $name"
+      stopped_any=1
+    fi
+  done
+  if [[ "$stopped_any" -eq 0 ]]; then
+    echo "No Docker services were running."
+  fi
+fi
+
+echo "Done."

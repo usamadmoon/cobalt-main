@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+
+ROOT="$(pwd)"
+RUN_DIR="$ROOT/.run"
+PID_FILE="$RUN_DIR/web.pid"
+LOG_FILE="$RUN_DIR/web.log"
+API_URL="${WEB_DEFAULT_API:-http://localhost:9000/}"
+WEB_HOST="127.0.0.1"
+WEB_PORT="5173"
+
+mkdir -p "$RUN_DIR"
+
+if [[ -f "$PID_FILE" ]]; then
+  old_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [[ -n "${old_pid:-}" ]] && kill -0 "$old_pid" 2>/dev/null; then
+    echo "Already running (web pid $old_pid)."
+    echo "  API:  $API_URL"
+    echo "  Web:  http://$WEB_HOST:$WEB_PORT"
+    exit 0
+  fi
+  rm -f "$PID_FILE"
+fi
+
+echo "Starting Cobalt API..."
+docker compose up -d
+
+echo "Waiting for API at $API_URL ..."
+ready=0
+for _ in $(seq 1 30); do
+  if curl -sf -H "Accept: application/json" "http://127.0.0.1:9000/" >/dev/null; then
+    ready=1
+    break
+  fi
+  sleep 1
+done
+
+if [[ "$ready" -ne 1 ]]; then
+  echo "API did not become ready on http://localhost:9000" >&2
+  exit 1
+fi
+
+duration="$(docker exec cobalt printenv DURATION_LIMIT 2>/dev/null || echo "?")"
+echo "API is up (DURATION_LIMIT=$duration)"
+
+echo "Starting web UI at http://$WEB_HOST:$WEB_PORT ..."
+(
+  cd "$ROOT/web"
+  export WEB_DEFAULT_API="$API_URL"
+  export WEB_LOCAL_HTTP=1
+  exec pnpm run dev --host "$WEB_HOST" --port "$WEB_PORT"
+) >"$LOG_FILE" 2>&1 &
+web_pid=$!
+echo "$web_pid" >"$PID_FILE"
+
+# Give vite a moment to fail fast if something is wrong
+sleep 2
+if ! kill -0 "$web_pid" 2>/dev/null; then
+  echo "Web UI failed to start. Last log lines:" >&2
+  tail -n 40 "$LOG_FILE" >&2 || true
+  rm -f "$PID_FILE"
+  exit 1
+fi
+
+echo "Cobalt is running."
+echo "  API:  $API_URL"
+echo "  Web:  http://$WEB_HOST:$WEB_PORT"
+echo "  Log:  $LOG_FILE"
+echo "Stop with: ./stop"
